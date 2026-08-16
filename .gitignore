@@ -1,0 +1,136 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+pythonenv*
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# Environment Variables
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+logs/
+*.log.*
+bot.log
+error.log
+debug.log
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# Secret files
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets/
+config.local.py
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# poetry
+poetry.lock
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+
+# Uploads
+uploads/
+media/
+files/
+tmp/
+
+# Backup files
+*.bak
+*.backup
+*.tmp
+
+# Bot specific
+bot_token.txt
+credentials.json
+token.txt
+*.session
+*.session-journal
+
+# Deployment
+.pytest_cache/
+*.pid
+celerybeat-schedule
+celerybeat-schedule.db
+
+# Telegram session
+*.session
+*.session-journal
+
+# Documentation
+docs/_build/
+site/
+
+# Development
+*.swp
+*.swo
+*~
+.tern-port
