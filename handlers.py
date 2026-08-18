@@ -1,17 +1,17 @@
-import sqlite3
+import sqlite3  # ✅ Add this with other imports
 import secrets
 import string
-import random
-import asyncio
+import random  # If using the first version with random.shuffle
+import asyncio  # ✅ Add this line
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ContextTypes, ConversationHandler
 import re
-from api_client import APIClient  # ✅ Import class, not instance
+from api_client import api
 from config import config
 import logging
 from datetime import datetime
 from rate_limiter import RateLimiter
-from database import db
+from database import db  # ✅ ADD THIS LINE
 
 logger = logging.getLogger(__name__)
 
@@ -22,35 +22,22 @@ WITHDRAW_AMOUNT, WITHDRAW_METHOD, WITHDRAW_ACCOUNT, WITHDRAW_NAME = range(6, 10)
 
 class BingoBotHandlers:
     def __init__(self):
-        self.user_sessions = {}
+        self.user_sessions = {}  # In-memory cache for speed
         self.content_message_id = {}
         self.menu_message_id = {}
         self.user_languages = {}
         
-        # ✅ Create API client instance (stateless - no token storage)
-        self.api = APIClient()
-        
-        # Rate limiters
+        # ✅ Rate limiters
         self.general_limiter = RateLimiter(max_requests=10, time_window=60)
         self.deposit_limiter = RateLimiter(max_requests=3, time_window=60)
         self.withdraw_limiter = RateLimiter(max_requests=2, time_window=60)
         self.register_limiter = RateLimiter(max_requests=3, time_window=300)
         self.bingo_limiter = RateLimiter(max_requests=5, time_window=60)
         
-        # Load sessions from database on startup
+        # ✅ Load sessions from database on startup
         self.load_sessions()
         self.load_languages()
     
-    # ==================== HELPER: Get Token Safely ====================
-    
-    def _get_user_token(self, telegram_id):
-        """Get user's token from session storage safely"""
-        session = self.user_sessions.get(telegram_id)
-        if session:
-            return session.get('token')
-        return None
-    
-    # ==================== EXISTING METHODS (unchanged except API calls) ====================
     
     def load_sessions(self):
         """Load all sessions from database on startup"""
@@ -74,6 +61,7 @@ class BingoBotHandlers:
     def load_languages(self):
         """Load all language preferences from database"""
         try:
+            # ✅ Use database module instead of direct SQLite
             all_languages = db.get_all_languages()
             for telegram_id, language in all_languages:
                 self.user_languages[telegram_id] = language
@@ -86,6 +74,7 @@ class BingoBotHandlers:
         """Save current session to database"""
         if telegram_id in self.user_sessions:
             session = self.user_sessions[telegram_id]
+            # ✅ Make sure token is included
             if session.get('token'):
                 db.save_session(telegram_id, session)
                 logger.debug(f"💾 Session saved to database for {telegram_id}")
@@ -99,9 +88,11 @@ class BingoBotHandlers:
 
     def get_user_language(self, telegram_id):
         """Get user language (with database fallback)"""
+        # Check in-memory cache first
         if str(telegram_id) in self.user_languages:
             return self.user_languages.get(str(telegram_id), 'am')
         
+        # ✅ Check database
         lang = db.get_language(str(telegram_id))
         self.user_languages[str(telegram_id)] = lang
         return lang
@@ -109,6 +100,7 @@ class BingoBotHandlers:
     def set_user_language(self, telegram_id, lang):
         """Set user language (saves to database)"""
         self.user_languages[str(telegram_id)] = lang
+        # ✅ Save to database
         db.save_language(str(telegram_id), lang)
         logger.info(f"🌐 Language set to {lang} for {telegram_id}")
 
@@ -127,8 +119,8 @@ class BingoBotHandlers:
     def format_currency(self, amount):
         return f"{amount:,.2f} ETB"
 
-    # ==================== UPDATE HELPERS (unchanged) ====================
-    
+    # ==================== UPDATE HELPERS ====================
+
     async def update_content(self, bot, chat_id, message_text, parse_mode='Markdown'):
         """Update content message (the scrollable part)"""
         try:
@@ -201,8 +193,8 @@ class BingoBotHandlers:
     def get_register_keyboard(self, telegram_id=None):
         return self.get_persistent_reply_keyboard(is_auth=False, telegram_id=telegram_id)
 
-    # ==================== KEYBOARDS (unchanged) ====================
-    
+    # ==================== KEYBOARDS ====================
+
     def get_persistent_reply_keyboard(self, is_auth=True, telegram_id=None):
         """Returns localized reply keyboard based on user's language choice."""
         lang = self.get_user_language(telegram_id) if telegram_id else 'en'
@@ -347,14 +339,15 @@ class BingoBotHandlers:
         for _ in range(length - 4):
             password.append(secrets.choice(all_chars))
         
+        # Shuffle
         for i in range(len(password) - 1, 0, -1):
             j = secrets.randbelow(i + 1)
             password[i], password[j] = password[j], password[i]
         
         return ''.join(password)
 
-    # ==================== LANGUAGE SELECTION (unchanged) ====================
-    
+    # ==================== LANGUAGE SELECTION ====================
+
     async def show_language_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
         telegram_id = str(update.effective_user.id)
@@ -397,44 +390,59 @@ class BingoBotHandlers:
             reply_markup=self.get_persistent_reply_keyboard(is_auth=is_auth, telegram_id=telegram_id)
         )
 
-    # ==================== CHECK USER ====================
-    
+    # ==================== CHECK & USER ====================
+
     async def check_user_exists(self, telegram_id):
-        """Check if user exists - ✅ uses token from session, NOT global state"""
+        """
+        CORRECT ORDER:
+        1. ALWAYS check backend FIRST (check_user_and_token)
+        2. If backend says user exists → handle token status
+        3. If backend says user not found → ask to register
+        4. Only if backend fails (network) → try database fallback
+        """
         
-        # Get token from session
-        token = self._get_user_token(telegram_id)
-        
-        # Get tg_id from session
+        # ✅ STEP 1: FIRST - Make API call to backend
+        # Get tg_id - try from memory first
+        tg_id = None
         session = self.user_sessions.get(telegram_id)
-        tg_id = session.get('tg_id') if session else None
+        if session and session.get('tg_id'):
+            tg_id = session.get('tg_id')
         
+        # If not in memory, try database as fallback (only for tg_id)
         if not tg_id:
             db_session = db.get_session(str(telegram_id))
             if db_session and db_session.get('tg_id'):
                 tg_id = db_session.get('tg_id')
         
+        # If no tg_id anywhere, we can't check backend
         if not tg_id:
             return False, "❌ Please register first with /register."
         
-        # ✅ Pass token to API call (NOT using global state)
+        # Set token for API call (if available in memory)
+        if session and session.get('token'):
+            api.set_token(session.get('token'))
+        
+        # ✅ STEP 2: Make API call to backend (ALWAYS FIRST)
         max_retries = 5
         retry_delay = 3
         
         for attempt in range(max_retries):
             logger.info(f"🔍 Checking user {tg_id} with backend (attempt {attempt+1}/{max_retries})...")
             
-            response = self.api.check_user_and_token(tg_id, token=token)  # ✅ Token passed explicitly
+            response = api.check_user_and_token(tg_id)
             
+            # ✅ If API call SUCCEEDED - Backend has the truth!
             if response['success']:
                 data = response['data']
                 user_data = data.get('user')
                 token_status = data.get('token_status')
                 new_token = data.get('token')
                 
+                # ✅ CASE 1: USER EXISTS and token is VALID
                 if user_data and token_status == 'valid':
                     logger.info(f"✅ User found and token valid for {telegram_id}")
                     
+                    # Update session in memory
                     self.user_sessions[telegram_id] = {
                         'user_id': user_data.get('_id'),
                         'token': session.get('token') if session else None,
@@ -445,55 +453,71 @@ class BingoBotHandlers:
                     self.save_session_to_db(telegram_id)
                     return True, user_data
                 
+                # ✅ CASE 2: USER EXISTS but token was REFRESHED (new token provided)
                 if user_data and token_status == 'refreshed' and new_token:
                     logger.info(f"🔄 Token auto-refreshed for user {telegram_id}")
+                    logger.info(f"   New token: {new_token[:20]}...")
                     
+                    # Save session with NEW token
                     self.user_sessions[telegram_id] = {
                         'user_id': user_data.get('_id'),
-                        'token': new_token,
+                        'token': new_token,  # NEW TOKEN
                         'user_data': user_data,
                         'phone': user_data.get('phone'),
                         'tg_id': tg_id
                     }
+                    api.set_token(new_token)
                     self.save_session_to_db(telegram_id)
                     logger.info(f"✅ Token saved for user {telegram_id}")
                     return True, user_data
                 
+                # ✅ CASE 3: USER NOT FOUND by backend
                 if not user_data:
                     logger.warning(f"❌ User {tg_id} not found in backend")
+                    # Delete any local session
                     if telegram_id in self.user_sessions:
                         del self.user_sessions[telegram_id]
                     db.delete_session(telegram_id)
+                    api.set_token(None)
                     return False, "❌ Your account was not found. Please register with /register."
                 
+                # Fallback
                 return False, "⚠️ Something went wrong. Please try again."
             
+            # ✅ If API call FAILED (network error, timeout, etc.)
             error_msg = response.get('message', '').lower()
             
+            # ✅ USER NOT FOUND in backend (API returned error)
             if 'not found' in error_msg or 'user not found' in error_msg:
                 logger.warning(f"❌ User {tg_id} not found in backend (API error)")
                 if telegram_id in self.user_sessions:
                     del self.user_sessions[telegram_id]
                 db.delete_session(telegram_id)
+                api.set_token(None)
                 return False, "❌ Your account was not found. Please register with /register."
             
+            # ✅ NEW: USER ACCOUNT DEACTIVATED → Show message (NO RETRY)
             if 'deactivated' in error_msg or 'account is deactivated' in error_msg:
                 logger.warning(f"⚠️ User account is deactivated for {telegram_id}")
+                # ✅ Delete session from database and memory
                 if telegram_id in self.user_sessions:
                     del self.user_sessions[telegram_id]
                 db.delete_session(telegram_id)
+                api.set_token(None)
                 return False, "❌ Your account has been deactivated. Please contact support."
             
+            # ✅ TIMEOUT or NETWORK ERROR → Retry
             if 'timeout' in error_msg or 'timed out' in error_msg or 'connection' in error_msg:
                 if attempt < max_retries - 1:
                     logger.warning(f"⏳ Network error (attempt {attempt+1}/{max_retries}), retrying in {retry_delay}s...")
                     await asyncio.sleep(retry_delay)
-                    retry_delay *= 2
+                    retry_delay *= 2  # Exponential backoff
                     continue
                 else:
                     logger.error(f"❌ Max retries reached for {telegram_id}")
                     break
             
+            # ✅ Any other error - retry
             logger.warning(f"⚠️ Unknown error: {error_msg}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(retry_delay)
@@ -501,10 +525,12 @@ class BingoBotHandlers:
                 continue
             break
         
+        # ✅ All retries failed → Show server error (NOT registration)
         return False, "⚠️ The server is currently unavailable. Please try again in a few moments."
-
-    # ==================== START (unchanged except API calls) ====================
     
+    
+    # ==================== START & MENU ====================
+
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Start command with rate limiting, referral handling, and user validation"""
         user = update.effective_user
@@ -512,6 +538,7 @@ class BingoBotHandlers:
         telegram_id = str(user.id)
         lang = self.get_user_language(telegram_id)
         
+        # ✅ Rate limit check - General commands
         is_allowed, remaining = self.general_limiter.is_allowed(telegram_id)
         if not is_allowed:
             msg = "⏳ በጣም ብዙ ጥያቄዎች! እባክዎ 60 ሰከንድ ይጠብቁ." if lang == 'am' else "⏳ Too many requests! Please wait 60 seconds."
@@ -522,6 +549,7 @@ class BingoBotHandlers:
             )
             return
         
+        # ✅ Validate Telegram user exists
         if not user or not user.id:
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -529,17 +557,22 @@ class BingoBotHandlers:
             )
             return
         
+        # ✅ Check for referral code from deep link
+        # URL: https://t.me/fetta_bingo_bot?start=ref_6a82f631eaaa9547a17ee472
         if context.args:
             start_param = context.args[0]
             if start_param.startswith('ref_'):
                 referral_user_id = start_param.replace('ref_', '')
+                # ✅ Validate referral ID format (should be a valid ObjectId or similar)
                 if referral_user_id and len(referral_user_id) >= 10:
                     context.user_data['referral_id'] = referral_user_id
                     logger.info(f"🔗 User {telegram_id} came from referral: {referral_user_id}")
                 else:
                     logger.warning(f"⚠️ Invalid referral ID format: {referral_user_id}")
         
+        # ✅ Check if user is authenticated
         if self.is_authenticated(telegram_id):
+            # ✅ Check if user exists in database
             user_exists, result = await self.check_user_exists(telegram_id)
             if not user_exists:
                 await context.bot.send_message(
@@ -551,6 +584,7 @@ class BingoBotHandlers:
             
             user_data = result
             
+            # ✅ Validate user data
             if not user_data or not user_data.get('_id'):
                 await context.bot.send_message(
                     chat_id=chat_id,
@@ -559,6 +593,7 @@ class BingoBotHandlers:
                 )
                 return
             
+            # ✅ Build welcome message based on language
             if lang == 'am':
                 content = (
                     f"👋 *እንኳን ደህና መጡ, {user_data.get('first_name', user.first_name or 'ተጠቃሚ')}!*\n\n"
@@ -581,6 +616,7 @@ class BingoBotHandlers:
                 reply_markup=self.get_persistent_reply_keyboard(is_auth=True, telegram_id=telegram_id)
             )
         else:
+            # ✅ User not authenticated - show registration screen
             if lang == 'am':
                 content = (
                     "🎯 *እንኳን ወደ ጋሻ ቢንጎ ቦት በደህና መጡ!*\n\n"
@@ -604,6 +640,7 @@ class BingoBotHandlers:
                 )
                 reg_text = "👇 Tap below to register:"
 
+            # ✅ Send registration screen with persistent keyboard
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=content,
@@ -611,14 +648,15 @@ class BingoBotHandlers:
                 reply_markup=self.get_persistent_reply_keyboard(is_auth=False, telegram_id=telegram_id)
             )
             
+            # ✅ Send registration button
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=reg_text,
                 reply_markup=self.get_register_inline_keyboard(lang=lang)
             )
 
-    # ==================== REGISTER (unchanged except API calls) ====================
-    
+    # ==================== REGISTER ====================
+
     async def register_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Start registration - Ask user to share phone number with rate limiting"""
         if update.callback_query:
@@ -629,6 +667,7 @@ class BingoBotHandlers:
         telegram_id = str(user.id)
         lang = self.get_user_language(telegram_id)
 
+        # ✅ Rate limit check - Registration attempts (3 per 5 minutes)
         is_allowed, remaining = self.register_limiter.is_allowed(telegram_id)
         if not is_allowed:
             msg = "⏳ በጣም ብዙ የምዝገባ ሙከራዎች! እባክዎ 5 ደቂቃ ይጠብቁ." if lang == 'am' else "⏳ Too many registration attempts! Please wait 5 minutes."
@@ -639,6 +678,7 @@ class BingoBotHandlers:
             )
             return ConversationHandler.END
 
+        # ✅ Validate user exists
         if not user or not user.id:
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -647,6 +687,7 @@ class BingoBotHandlers:
             )
             return ConversationHandler.END
 
+        # ✅ Check if already authenticated
         if self.is_authenticated(telegram_id):
             msg = "✅ ቀደም ብለው ተመዝግበው ገብተዋል!" if lang == 'am' else "✅ You are already registered and logged in!"
             await context.bot.send_message(
@@ -656,6 +697,7 @@ class BingoBotHandlers:
             )
             return ConversationHandler.END
 
+        # ✅ Create keyboard with "Share Phone Number" button
         if lang == 'am':
             phone_btn_text = "📱 የስልክ ቁጥር ያጋሩ"
             cancel_btn_text = "❌ ሰርዝ"
@@ -679,6 +721,7 @@ class BingoBotHandlers:
                 "• Security purposes"
             )
 
+        # ✅ Create keyboard with sanitized labels
         keyboard = [
             [KeyboardButton(phone_btn_text, request_contact=True)],
             [InlineKeyboardButton(cancel_btn_text, callback_data='cancel')]
@@ -697,19 +740,24 @@ class BingoBotHandlers:
         )
         return REGISTER_PHONE
 
+
     async def register_phone(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle phone number from contact share with validation and secure password generation"""
         chat_id = update.effective_chat.id
         telegram_id = str(update.effective_user.id)
         lang = self.get_user_language(telegram_id)
 
+        # ✅ Check if user shared contact or entered manually
         if update.message.contact:
             phone = update.message.contact.phone_number
+            # ✅ Sanitize phone number
             phone = self.sanitize_phone(phone)
         else:
             phone = update.message.text.strip()
+            # ✅ Sanitize phone number
             phone = self.sanitize_phone(phone)
             
+            # ✅ Validate manual entry
             if not re.match(r'^(09|07)\d{8}$', phone) and not re.match(r'^\+251[79]\d{8}$', phone):
                 if lang == 'am':
                     content = (
@@ -743,11 +791,13 @@ class BingoBotHandlers:
                 )
                 return REGISTER_PHONE
 
+        # ✅ Format phone number: +2519XXXXXXXX -> 09XXXXXXXX
         if phone.startswith('+251'):
             phone = '0' + phone[4:]
         elif phone.startswith('251'):
             phone = '0' + phone[3:]
 
+        # ✅ Validate Ethiopian phone number format
         if not re.match(r'^(09|07)\d{8}$', phone):
             if lang == 'am':
                 content = (
@@ -782,19 +832,24 @@ class BingoBotHandlers:
             )
             return REGISTER_PHONE
 
+        # ✅ Store validated phone
         context.user_data['register_phone'] = phone
         
+        # ✅ Generate secure password
         generated_password = self.generate_secure_password()
         context.user_data['register_password'] = generated_password
 
+        # ✅ Show loading message
         loading_msg = "⏳ እባክዎ ይጠብቁ... ምዝገባ በሂደት ላይ ነው..." if lang == 'am' else "⏳ Please wait... Registration in progress..."
         sent = await context.bot.send_message(
             chat_id=chat_id,
             text=loading_msg
         )
 
+        # ✅ Auto-register - skip password confirmation
         result = await self.register_confirm(update, context)
 
+        # ✅ Delete loading message
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
         except Exception as e:
@@ -804,6 +859,7 @@ class BingoBotHandlers:
 
     async def register_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Complete registration with phone and auto-generated password"""
+        # Get chat_id and user
         if update.callback_query:
             query = update.callback_query
             await query.answer()
@@ -830,9 +886,11 @@ class BingoBotHandlers:
             context.user_data.clear()
             return ConversationHandler.END
 
+        # Get Telegram username
         username = user.username
         first_name = user.first_name
 
+        # Format tg_id
         if username:
             tg_id = username.replace('@', '').strip()
             if len(tg_id) < 4:
@@ -842,18 +900,20 @@ class BingoBotHandlers:
         else:
             tg_id = telegram_id
 
+        # ✅ Get referral ID from context
         referral_id = context.user_data.get('referral_id')
         if referral_id:
             logger.info(f"🔗 Registering user with referral: {referral_id}")
 
-        # ✅ Register user - NO token needed
-        response = self.api.register_user(
+        # ✅ FIRST: Try to register user
+        response = api.register_user(
             phone=phone, 
             password=password, 
             tg_id=tg_id,
             agent_id=referral_id
         )
 
+        # ✅ CASE 1: Registration SUCCESS - New user
         if response['success']:
             data = response['data']
             token = data.get('token')
@@ -862,6 +922,7 @@ class BingoBotHandlers:
             if token and user_data:
                 logger.info(f"✅ New user registered for {telegram_id}")
                 
+                # ✅ Save session in memory
                 self.user_sessions[telegram_id] = {
                     'user_id': user_data.get('_id'),
                     'token': token,
@@ -869,9 +930,12 @@ class BingoBotHandlers:
                     'phone': phone,
                     'tg_id': tg_id
                 }
+                api.set_token(token)
                 
+                # ✅ Save session to database
                 self.save_session_to_db(telegram_id)
                 
+                # ✅ Clear cached message IDs
                 if hasattr(self, 'menu_message_id') and chat_id in self.menu_message_id:
                     try:
                         await context.bot.delete_message(chat_id=chat_id, message_id=self.menu_message_id[chat_id])
@@ -889,6 +953,7 @@ class BingoBotHandlers:
                 wallet_balance = user_data.get('wallet', 0)
                 bonus_amount = wallet_balance
 
+                # ✅ Show REGISTRATION SUCCESS message
                 if lang == 'am':
                     content = (
                         f"🎉 *ምዝገባዎ በስኬት ተጠናቋል!*\n\n"
@@ -923,6 +988,7 @@ class BingoBotHandlers:
                     reply_markup=self.get_persistent_reply_keyboard(is_auth=True, telegram_id=telegram_id)
                 )
                 
+                # ✅ Clear referral data
                 context.user_data.pop('referral_id', None)
                 context.user_data.clear()
                 return ConversationHandler.END
@@ -936,11 +1002,14 @@ class BingoBotHandlers:
                 context.user_data.clear()
                 return ConversationHandler.END
 
+        # ✅ CASE 2: Registration FAILED - User might already exist
         error_msg = response.get('message', 'Registration failed').lower()
         
+        # ✅ Check if error is "User already exists"
         if 'user already exists' in error_msg or 'already exists' in error_msg:
             logger.info(f"🔄 User already exists with phone {phone}, attempting activation...")
             
+            # ✅ Send "Please wait" message
             if lang == 'am':
                 waiting_msg = "⏳ እባክዎ ይጠብቁ... መለያዎን እያነቃቃን ነው..."
             else:
@@ -951,11 +1020,8 @@ class BingoBotHandlers:
                 text=waiting_msg
             )
             
-            # ✅ Get token from session (if exists)
-            token = self._get_user_token(telegram_id)
-            
-            # ✅ Pass token to API call
-            check_response = self.api.check_user_and_token(tg_id, token=token)  # ✅ Token passed explicitly
+            # ✅ Call check_user_and_token to get/refresh token
+            check_response = api.check_user_and_token(tg_id)
             
             if check_response['success']:
                 data = check_response['data']
@@ -964,19 +1030,25 @@ class BingoBotHandlers:
                 new_token = data.get('token')
                 
                 if user_data:
+                    # ✅ Delete waiting message
                     try:
                         await context.bot.delete_message(chat_id=chat_id, message_id=wait_message.message_id)
                     except:
                         pass
                     
+                    # ✅ CASE 1: USER EXISTS and token is VALID
                     if token_status == 'valid':
                         logger.info(f"✅ User found and token valid for {telegram_id}")
                         
+                        # Get the existing token from session or keep current
                         existing_token = self.user_sessions.get(telegram_id, {}).get('token')
                         token_to_use = existing_token
+                        
+                        # If no token in memory, try to use the one from check response
                         if not token_to_use:
                             token_to_use = new_token
                         
+                        # ✅ Save session in memory
                         self.user_sessions[telegram_id] = {
                             'user_id': user_data.get('_id'),
                             'token': token_to_use,
@@ -984,24 +1056,42 @@ class BingoBotHandlers:
                             'phone': user_data.get('phone'),
                             'tg_id': tg_id
                         }
+                        
+                        # ✅ Save to database
                         self.save_session_to_db(telegram_id)
+                        
+                        # ✅ Set token for API
+                        if token_to_use:
+                            api.set_token(token_to_use)
+                        
+                        logger.info(f"✅ Session saved for user {telegram_id}")
                     
+                    # ✅ CASE 2: USER EXISTS but token was REFRESHED (new token provided)
                     elif token_status == 'refreshed' and new_token:
                         logger.info(f"🔄 Token auto-refreshed for user {telegram_id}")
+                        logger.info(f"   New token: {new_token[:20]}...")
                         
+                        # ✅ Save session with NEW token in memory
                         self.user_sessions[telegram_id] = {
                             'user_id': user_data.get('_id'),
-                            'token': new_token,
+                            'token': new_token,  # NEW TOKEN
                             'user_data': user_data,
                             'phone': user_data.get('phone'),
                             'tg_id': tg_id
                         }
+                        
+                        # ✅ Update API client with new token
+                        api.set_token(new_token)
+                        
+                        # ✅ Save session to database
                         self.save_session_to_db(telegram_id)
+                        
                         logger.info(f"✅ Token saved for user {telegram_id}")
                     
+                    # ✅ CASE 3: Fallback - Try to login
                     else:
                         logger.info(f"🔄 No token provided, attempting login for {telegram_id}")
-                        login_response = self.api._make_request('POST', '/auth/login', {
+                        login_response = api._make_request('POST', '/auth/login', {
                             'phone': phone,
                             'password': password
                         })
@@ -1012,6 +1102,7 @@ class BingoBotHandlers:
                             user_info = login_data.get('user', {})
                             
                             if token_to_use:
+                                # ✅ Save session with login token
                                 self.user_sessions[telegram_id] = {
                                     'user_id': user_info.get('_id') or user_data.get('_id'),
                                     'token': token_to_use,
@@ -1019,10 +1110,12 @@ class BingoBotHandlers:
                                     'phone': phone,
                                     'tg_id': tg_id
                                 }
+                                api.set_token(token_to_use)
                                 self.save_session_to_db(telegram_id)
                                 logger.info(f"✅ Login successful for user {telegram_id}")
                             else:
                                 logger.error(f"❌ Login failed - no token received")
+                                # Show error and return
                                 content = "❌ መለያዎን ማነቃቃት አልተቻለም። እባክዎ በኋላ እንደገና ይሞክሩ።" if lang == 'am' else "❌ Could not activate your account. Please try again later."
                                 await context.bot.send_message(
                                     chat_id=chat_id,
@@ -1042,6 +1135,7 @@ class BingoBotHandlers:
                             context.user_data.clear()
                             return ConversationHandler.END
                     
+                    # ✅ Clear cached message IDs
                     if hasattr(self, 'menu_message_id') and chat_id in self.menu_message_id:
                         try:
                             await context.bot.delete_message(chat_id=chat_id, message_id=self.menu_message_id[chat_id])
@@ -1056,10 +1150,12 @@ class BingoBotHandlers:
                             pass
                         self.content_message_id.pop(chat_id, None)
 
+                    # ✅ Get the saved user data
                     saved_user_data = self.user_sessions[telegram_id]['user_data']
                     wallet_balance = saved_user_data.get('wallet', 0)
                     bonus_amount = wallet_balance
 
+                    # ✅ Show ACTIVATION SUCCESS message (different from registration)
                     if lang == 'am':
                         content = (
                             f"🎉 *አክቲቪኑ በስኬት ተጠናቋል!*\n\n"
@@ -1094,11 +1190,13 @@ class BingoBotHandlers:
                         reply_markup=self.get_persistent_reply_keyboard(is_auth=True, telegram_id=telegram_id)
                     )
                     
+                    # ✅ Clear referral data
                     context.user_data.pop('referral_id', None)
                     context.user_data.clear()
                     return ConversationHandler.END
                     
                 else:
+                    # No user data from check_user_and_token
                     try:
                         await context.bot.delete_message(chat_id=chat_id, message_id=wait_message.message_id)
                     except:
@@ -1113,6 +1211,7 @@ class BingoBotHandlers:
                     context.user_data.clear()
                     return ConversationHandler.END
             else:
+                # check_user_and_token failed
                 try:
                     await context.bot.delete_message(chat_id=chat_id, message_id=wait_message.message_id)
                 except:
@@ -1127,6 +1226,7 @@ class BingoBotHandlers:
                 context.user_data.clear()
                 return ConversationHandler.END
         
+        # ✅ CASE 3: Other error (not user exists)
         else:
             content = f"❌ {response.get('message', 'Registration failed')}"
             await context.bot.send_message(
@@ -1139,6 +1239,7 @@ class BingoBotHandlers:
 
     # ==================== PLAY BINGO ====================
 
+
     async def play_bingo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Play Bingo - Open as Telegram WebApp with code in URL"""
         
@@ -1149,6 +1250,7 @@ class BingoBotHandlers:
         chat_id = update.effective_chat.id
         telegram_id = str(user.id)
 
+        # ✅ Rate limit check - Bingo games (5 per minute)
         is_allowed, remaining = self.bingo_limiter.is_allowed(telegram_id)
         if not is_allowed:
             lang = self.get_user_language(telegram_id)
@@ -1163,6 +1265,7 @@ class BingoBotHandlers:
             )
             return
 
+        # Check if user exists in database
         user_exists, result = await self.check_user_exists(telegram_id)
 
         if not user_exists:
@@ -1181,12 +1284,9 @@ class BingoBotHandlers:
         self.user_sessions[telegram_id]['user_data'] = user_data
 
         user_id = self.user_sessions[telegram_id].get('user_id')
-        
-        # ✅ Get token from session
-        token = self._get_user_token(telegram_id)
 
-        # ✅ Generate game code with token
-        code_response = self.api.generate_game_code(user_id, token=token)  # ✅ Token passed explicitly
+        # Generate one-time game code
+        code_response = api.generate_game_code(user_id)
 
         if not code_response['success']:
             await context.bot.send_message(
@@ -1203,6 +1303,7 @@ class BingoBotHandlers:
 
         from telegram import WebAppInfo
 
+        # Bingo WebApp URL
         bingo_url = (
             f"https://addis-bingo-game-client.vercel.app"
             f"/user/lobby?code={code}"
@@ -1233,6 +1334,7 @@ class BingoBotHandlers:
             ]
         ])
 
+        # Send temporary message
         message = await context.bot.send_message(
             chat_id=chat_id,
             text=welcome_text,
@@ -1240,6 +1342,7 @@ class BingoBotHandlers:
             reply_markup=keyboard
         )
         
+        # Schedule deletion after 20 seconds
         context.job_queue.run_once(
             self.delete_bingo_message,
             20,
@@ -1249,9 +1352,12 @@ class BingoBotHandlers:
             }
         )
 
+        
     async def delete_bingo_message(self, context: ContextTypes.DEFAULT_TYPE):
-        """Delete temporary Bingo WebApp message after 20 seconds."""
+        """Delete temporary Bingo WebApp message after 1 minute."""
+
         job_data = context.job.data
+
         chat_id = job_data['chat_id']
         message_id = job_data['message_id']
 
@@ -1260,9 +1366,17 @@ class BingoBotHandlers:
                 chat_id=chat_id,
                 message_id=message_id
             )
-            print(f"🗑️ Deleted Bingo launch message {message_id} from chat {chat_id}")
+
+            print(
+                f"🗑️ Deleted Bingo launch message "
+                f"{message_id} from chat {chat_id}"
+            )
+
         except Exception as e:
-            print(f"⚠️ Could not delete Bingo launch message {message_id}: {e}")
+            print(
+                f"⚠️ Could not delete Bingo launch message "
+                f"{message_id}: {e}"
+            )
 
     # ==================== DEPOSIT ====================
 
@@ -1276,6 +1390,7 @@ class BingoBotHandlers:
         telegram_id = str(user.id)
         lang = self.get_user_language(telegram_id)
 
+        # ✅ Rate limit check - Deposit requests (3 per minute)
         is_allowed, remaining = self.deposit_limiter.is_allowed(telegram_id)
         if not is_allowed:
             msg = "⏳ በጣም ብዙ የገቢ ጥያቄዎች! እባክዎ 60 ሰከንድ ይጠብቁ." if lang == 'am' else "⏳ Too many deposit requests! Please wait 60 seconds."
@@ -1286,6 +1401,7 @@ class BingoBotHandlers:
             )
             return ConversationHandler.END
 
+        # Check if user exists in database
         user_exists, result = await self.check_user_exists(telegram_id)
         if not user_exists:
             await context.bot.send_message(
@@ -1338,11 +1454,8 @@ class BingoBotHandlers:
         }
         method_display = method_names.get(method, method.upper())
 
-        # ✅ Get token from session
-        token = self._get_user_token(telegram_id)
-        
-        # ✅ Pass token to API call
-        response = self.api.get_accountants(token=token, blocked=False)  # ✅ Token passed explicitly
+        api.set_token(self.user_sessions[telegram_id]['token'])
+        response = api.get_accountants(blocked=False)
 
         if not response['success'] or not response['data']:
             err_msg = "❌ የክፍያ ዝርዝሮች በአሁኑ ጊዜ አይገኙም። እባክዎ በኋላ እንደገና ይሞክሩ።" if lang == 'am' else "❌ No deposit payment details currently available. Please try again later."
@@ -1399,6 +1512,7 @@ class BingoBotHandlers:
         telegram_id = str(update.effective_user.id)
         lang = self.get_user_language(telegram_id)
 
+        # ✅ Sanitize and validate amount
         try:
             amount = self.sanitize_amount(update.message.text.strip())
         except ValueError as e:
@@ -1410,6 +1524,7 @@ class BingoBotHandlers:
             )
             return DEPOSIT_AMOUNT
 
+        # ✅ Validate minimum deposit
         if amount < 10:
             err_msg = "❌ አነስተኛ ገቢ 10 ብር ነው።" if lang == 'am' else "❌ Minimum deposit is 10 ETB."
             await context.bot.send_message(
@@ -1419,11 +1534,14 @@ class BingoBotHandlers:
             )
             return DEPOSIT_AMOUNT
 
+        # ✅ Store validated amount
         context.user_data['deposit_amount'] = amount
         
+        # ✅ Calculate bonus
         bonus = amount * 0.005 if amount > 50 else 0
         total = amount + bonus
 
+        # ✅ Get method and accountant info
         method = context.user_data.get('deposit_method', 'telebirr')
         accountant = context.user_data.get('deposit_accountant', {})
 
@@ -1438,6 +1556,7 @@ class BingoBotHandlers:
         phone_or_acc = accountant.get('phoneNumber') or accountant.get('accountNumber') or 'N/A'
         account_name = accountant.get('fullName', '')
 
+        # ✅ Build response based on language
         if lang == 'am':
             if method in ['telebirr', 'cbe']:
                 account_info = f"📱 *{method_display}*\n\n`{phone_or_acc}`"
@@ -1531,11 +1650,8 @@ class BingoBotHandlers:
             'method': method
         }
 
-        # ✅ Get token from session
-        token = self._get_user_token(telegram_id)
-        
-        # ✅ Pass token to API call
-        response = self.api.create_transaction(deposit_data, token=token)  # ✅ Token passed explicitly
+        api.set_token(self.user_sessions[telegram_id]['token'])
+        response = api.create_transaction(deposit_data)
 
         if response['success']:
             if lang == 'am':
@@ -1580,6 +1696,7 @@ class BingoBotHandlers:
         telegram_id = str(user.id)
         lang = self.get_user_language(telegram_id)
 
+        # ✅ Rate limit check - Withdrawal requests (2 per minute)
         is_allowed, remaining = self.withdraw_limiter.is_allowed(telegram_id)
         if not is_allowed:
             msg = "⏳ በጣም ብዙ የወጪ ጥያቄዎች! እባክዎ 60 ሰከንድ ይጠብቁ." if lang == 'am' else "⏳ Too many withdrawal requests! Please wait 60 seconds."
@@ -1590,6 +1707,7 @@ class BingoBotHandlers:
             )
             return ConversationHandler.END
 
+        # Check if user exists in database
         user_exists, result = await self.check_user_exists(telegram_id)
         if not user_exists:
             await context.bot.send_message(
@@ -1599,11 +1717,8 @@ class BingoBotHandlers:
             )
             return ConversationHandler.END
 
-        # ✅ Get token from session
-        token = self._get_user_token(telegram_id)
-        
-        # ✅ Pass token to API call
-        response = self.api.get_user_profile(token=token)  # ✅ Token passed explicitly
+        api.set_token(self.user_sessions[telegram_id]['token'])
+        response = api.get_user_profile()
 
         if response['success']:
             user_data = response['data']
@@ -1673,6 +1788,7 @@ class BingoBotHandlers:
         telegram_id = str(update.effective_user.id)
         lang = self.get_user_language(telegram_id)
 
+        # ✅ Sanitize and validate amount
         try:
             amount = self.sanitize_amount(update.message.text.strip())
         except ValueError as e:
@@ -1684,6 +1800,7 @@ class BingoBotHandlers:
             )
             return WITHDRAW_AMOUNT
 
+        # ✅ Validate minimum withdrawal
         if amount < 100:
             err_msg = "❌ አነስተኛ የማውጫ መጠን 100 ብር ነው።" if lang == 'am' else "❌ Minimum withdrawal amount is 100 ETB."
             await context.bot.send_message(
@@ -1693,9 +1810,11 @@ class BingoBotHandlers:
             )
             return WITHDRAW_AMOUNT
 
+        # ✅ Get user balance
         user_data = self.user_sessions[telegram_id]['user_data']
         balance = user_data.get('wallet', 0)
 
+        # ✅ Validate sufficient balance
         if amount > balance:
             err_msg = f"❌ በቂ ቀሪ ሂሳብ የሎትም። ያለው ቀሪ ሂሳብ {self.format_currency(balance)} ነው።" if lang == 'am' else f"❌ Insufficient balance. Available balance is {self.format_currency(balance)}."
             await context.bot.send_message(
@@ -1705,6 +1824,7 @@ class BingoBotHandlers:
             )
             return WITHDRAW_AMOUNT
 
+        # ✅ Store validated amount
         context.user_data['withdraw_amount'] = amount
 
         content = f"💳 *መጠን:* {self.format_currency(amount)}\n\nእባክዎ ገንዘቡ የሚገባበትን የሂሳብ/ስልክ ቁጥር ያስገቡ:" if lang == 'am' else f"💳 *Amount:* {self.format_currency(amount)}\n\nPlease enter your account/phone number for withdrawal:"
@@ -1768,12 +1888,8 @@ class BingoBotHandlers:
         account = context.user_data.get('withdraw_account')
         user_data = self.user_sessions[telegram_id]['user_data']
 
-        # ✅ Get token from session
-        token = self._get_user_token(telegram_id)
-        
-        # ✅ Pass token to API calls
-        accountants_response = self.api.get_accountants(token=token, blocked=False)  # ✅ Token passed explicitly
-        
+        api.set_token(self.user_sessions[telegram_id]['token'])
+        accountants_response = api.get_accountants(blocked=False)
         accountant = None
         if accountants_response['success'] and accountants_response['data']:
             accountant = next((acc for acc in accountants_response['data'] if method in acc.get('bankName', '').lower()), accountants_response['data'][0])
@@ -1791,8 +1907,7 @@ class BingoBotHandlers:
             'method': method
         }
 
-        # ✅ Pass token to API call
-        response = self.api.create_transaction(withdrawal_data, token=token)  # ✅ Token passed explicitly
+        response = api.create_transaction(withdrawal_data)
 
         if response['success']:
             if lang == 'am':
@@ -1836,6 +1951,7 @@ class BingoBotHandlers:
         telegram_id = str(user.id)
         lang = self.get_user_language(telegram_id)
 
+        # Check if user exists in database
         user_exists, result = await self.check_user_exists(telegram_id)
         if not user_exists:
             await context.bot.send_message(
@@ -1845,11 +1961,8 @@ class BingoBotHandlers:
             )
             return
 
-        # ✅ Get token from session
-        token = self._get_user_token(telegram_id)
-        
-        # ✅ Pass token to API call
-        response = self.api.get_user_profile(token=token)  # ✅ Token passed explicitly
+        api.set_token(self.user_sessions[telegram_id]['token'])
+        response = api.get_user_profile()
 
         if response['success']:
             user_data = response['data']
@@ -1896,6 +2009,7 @@ class BingoBotHandlers:
         telegram_id = str(user.id)
         lang = self.get_user_language(telegram_id)
 
+        # Check if user exists in database
         user_exists, result = await self.check_user_exists(telegram_id)
         if not user_exists:
             await context.bot.send_message(
@@ -1906,12 +2020,8 @@ class BingoBotHandlers:
             return
 
         user_data = self.user_sessions[telegram_id]['user_data']
-        
-        # ✅ Get token from session
-        token = self._get_user_token(telegram_id)
-        
-        # ✅ Pass token to API call
-        response = self.api.get_transactions(user_data.get('_id'), token=token, limit=10)  # ✅ Token passed explicitly
+        api.set_token(self.user_sessions[telegram_id]['token'])
+        response = api.get_transactions(user_data.get('_id'), limit=10)
 
         if not response['success']:
             content = f"❌ የግብይት ታሪክ ማግኘት አልተቻለም: {response['message']}" if lang == 'am' else f"❌ Failed to fetch transactions: {response['message']}"
@@ -1946,10 +2056,9 @@ class BingoBotHandlers:
             reply_markup=self.get_persistent_reply_keyboard(is_auth=True, telegram_id=telegram_id)
         )
 
-    # ==================== INFO (unchanged) ====================
-    
+    # ==================== INFO ====================
+
     async def show_info(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show information about the bot and how to play"""
         if update.callback_query:
             await update.callback_query.answer()
 
@@ -1969,22 +2078,26 @@ class BingoBotHandlers:
                 "1️⃣ *እንዴት መመዝገብ ይቻላል? (Registration)*\n"
                 "1. **'Register / መመዝገብ'** የሚለውን ቁልፍ ይጫኑ።\n"
                 "2. **'Share Phone Number / ስልክ ቁጥር ያጋሩ'** የሚለው ሲመጣ ይንኩት።\n"
-                "3. በትክክል መመዝገብዎን የሚያረጋግጥ መልእክት ይደርስዎታል!\n\n"
+                "3. በትክክል መመዝገብዎን የሚያረጋግጥ መልእክት ይደርስዎታል![cite: 1]\n\n"
+
                 "2️⃣ *እንዴት ገንዘብ ገቢ ማድረግ ይቻላል? (Deposit)*\n"
                 "1. **'Deposit / ገቢ ማድረግ'** የሚለውን ቁልፍ ይንኩ።\n"
                 "2. የሚያስተላልፉትን የገንዘብ መጠን ያስገቡ (አነስተኛ ገቢ: 10 ETB / ከ 50 ETB በላይ ቦነስ አለው)።\n"
                 "3. የክፍያ አይነት ይምረጡ (Telebirr ወይም CBE)።\n"
                 "4. በተያያዘው ስልክ ወይም አካውንት ገንዘቡን አስተላልፈው የሚደርስዎትን የግብይት ቁጥር (Transaction ID) ያስገቡ።\n\n"
+
                 "3️⃣ *እንዴት መጫወት ይቻላል? (How to Play)*\n"
                 "1. **'Play Bingo'** የሚለውን ተጭነው የጨዋታ ዝርዝሮች ይመጣሉ ከነሱ የሚፈልጉትን play በማለት ከ1-400 ካሉት የመጫወቻ ካርዶች አንዱን ይምረጡ (በቀይ የተከበቡት በሌላ ተጫዋች የተያዙ ናቸው)።\n"
                 "2. የምዝገባ ሰከንድ አልቆ ጨዋታው ሲጀምር ከ1 እስከ 75 ያሉት ቁጥሮች በዘነደ መጥራት ይጀምራሉ።\n"
                 "3. የሚጠራው ቁጥር የእርስዎ ካርድ ላይ ካለ ቁጥሩን **ክሊክ** በማድረግ ይምረጡት (ከተሳሳቱ ድጋሚ ተጭነው ማጥፋት ይችላሉ)።\n"
                 "4. የተጠሩት ቁጥሮች **ወደጎን**፣ **ወደታች**፣ **በአግዳሚ (X)** ወይም **አራቱን ማእዘናት** ሲሞሉልዎት ወዲያውኑ **'BINGO'** የሚለውን ተጭነው ያሸንፉ! *(⚠️ ሳይሞላ BINGO ካሉ ከጨዋታው ይታገዳሉ)*\n\n"
+
                 "4️⃣ *እንዴት ገንዘብ ወጪ ማድረግ ይቻላል? (Withdrawal)*\n"
                 "1. **'Withdraw / ወጪ ማድረግ'** የሚለውን ቁልፍ ይንኩ።\n"
                 "2. ማውጣት የሚፈልጉትን የገንዘብ መጠን ያስገቡ።\n"
                 "3. ገንዘቡ ገቢ የሚሆንበትን የቴሌብር ወይም የባንክ ሂሳብ ቁጥርዎን ያስገቡ።\n"
-                "4. ጥያቄዎ ተቀባይነት አግኝቶ ገንዘቡ በደቂቃዎች ውስጥ ይላክልዎታል!\n\n"
+                "4. ጥያቄዎ ተቀባይነት አግኝቶ ገንዘቡ በደቂቃዎች ውስጥ ይላክልዎታል![cite: 1]\n\n"
+
                 "───────────────\n"
                 "💬 *ለበለጠ መረጃ እና ለማንኛውም ችግር:*\n"
                 f"📢 **ቻናል:** [Gasha Bingo Channel]({CHANNEL_LINK})\n"
@@ -1999,22 +2112,26 @@ class BingoBotHandlers:
                 "1️⃣ *How to Register:*\n"
                 "1. Click the **'Register'** button.\n"
                 "2. Tap **'Share Phone Number'** when prompted.\n"
-                "3. You will receive a confirmation message once registered successfully!\n\n"
+                "3. You will receive a confirmation message once registered successfully![cite: 1]\n\n"
+
                 "2️⃣ *How to Deposit Funds:*\n"
                 "1. Click the **'Deposit'** button.\n"
                 "2. Enter the amount you wish to transfer (Minimum: 10 ETB / 10% Bonus for deposits > 50 ETB).\n"
                 "3. Choose your payment method (Telebirr or CBE).\n"
                 "4. Transfer the money to the provided details and enter the received Transaction ID.\n\n"
+
                 "3️⃣ *How to Play Bingo:*\n"
                 "1. Click **'Play Bingo'** and Select prefered game and select a card from 1-400 (Red highlighted cards are already taken).\n"
                 "2. Once the countdown ends, numbers from 1 to 75 will be called randomly.\n"
                 "3. If a called number matches your card, **click** to mark it (click again to unmark if misclicked).\n"
                 "4. Complete a **horizontal line**, **vertical line**, **diagonal (X)**, or **4 corners**, then hit **'BINGO'** to win! *(⚠️ False Bingo calls lead to disqualification)*\n\n"
+
                 "4️⃣ *How to Withdraw Winnings:*\n"
                 "1. Click the **'Withdraw'** button.\n"
                 "2. Enter the amount you wish to withdraw.\n"
                 "3. Provide your Telebirr number or bank account details.\n"
-                "4. Your request will be processed, and funds transferred within minutes!\n\n"
+                "4. Your request will be processed, and funds transferred within minutes![cite: 1]\n\n"
+
                 "───────────────\n"
                 "💬 *Need Help or Support?*\n"
                 f"📢 **Official Channel:** [Gasha Bingo Channel]({CHANNEL_LINK})\n"
@@ -2029,10 +2146,9 @@ class BingoBotHandlers:
             reply_markup=self.get_persistent_reply_keyboard(is_auth=self.is_authenticated(telegram_id), telegram_id=telegram_id)
         )
 
-    # ==================== INVITE (unchanged) ====================
-    
+    # ==================== INVITE ====================
+
     async def show_invite(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show invite link for referral"""
         if update.callback_query:
             await update.callback_query.answer()
 
@@ -2042,6 +2158,7 @@ class BingoBotHandlers:
         is_auth = self.is_authenticated(telegram_id)
         lang = self.get_user_language(telegram_id)
 
+        # Check if user exists in database
         user_exists, result = await self.check_user_exists(telegram_id)
         if not user_exists:
             await context.bot.send_message(
@@ -2088,9 +2205,9 @@ class BingoBotHandlers:
             parse_mode='Markdown',
             reply_markup=self.get_persistent_reply_keyboard(is_auth=is_auth, telegram_id=telegram_id)
         )
-
-    # ==================== CONTACT (unchanged) ====================
-    
+        
+    # ==================== CONTACT ====================
+        
     async def show_contact(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show contact information and community channels for support"""
         if update.callback_query:
@@ -2152,11 +2269,11 @@ class BingoBotHandlers:
             reply_markup=reply_markup,
             disable_web_page_preview=True
         )
+        
+        
+    # ==================== TRANSFER ====================
 
-    # ==================== TRANSFER (unchanged) ====================
-    
     async def show_transfer(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show transfer funds functionality"""
         if update.callback_query:
             await update.callback_query.answer()
 
@@ -2164,6 +2281,7 @@ class BingoBotHandlers:
         telegram_id = str(update.effective_user.id)
         lang = self.get_user_language(telegram_id)
 
+        # Check if user exists in database
         user_exists, result = await self.check_user_exists(telegram_id)
         if not user_exists:
             await context.bot.send_message(
@@ -2185,10 +2303,9 @@ class BingoBotHandlers:
             reply_markup=self.get_persistent_reply_keyboard(is_auth=self.is_authenticated(telegram_id), telegram_id=telegram_id)
         )
 
-    # ==================== CANCEL (unchanged) ====================
-    
+    # ==================== CANCEL ====================
+
     async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Cancel current operation"""
         user = update.effective_user
         chat_id = update.effective_chat.id
         telegram_id = str(user.id)
