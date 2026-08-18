@@ -19,22 +19,19 @@ class APIClient:
                 'Authorization': f'Bearer {token}'
             })
         else:
-            # Remove authorization header if token is None
             self.session.headers.pop('Authorization', None)
     
     def _make_request(self, method, endpoint, data=None, params=None, requires_auth=False):
         """Make API request to backend"""
         url = f"{self.base_url}{endpoint}"
         
-        # Create headers
         headers = {'Content-Type': 'application/json'}
         
-        # Add authorization if required and token exists
         if requires_auth and self.token:
             headers['Authorization'] = f'Bearer {self.token}'
-            logger.info(f"🔑 Making authenticated request to {endpoint}")
+            logger.info(f"🔑 Making authenticated request")
         else:
-            logger.info(f"📡 Making public request to {endpoint}")
+            logger.info(f"📡 Making public request")
         
         try:
             response = self.session.request(
@@ -46,20 +43,17 @@ class APIClient:
                 timeout=60
             )
             
-            # Log response status
             logger.info(f"📊 Response status: {response.status_code}")
             
-            # Try to parse JSON response
             try:
                 result = response.json()
             except:
-                return {'success': False, 'message': 'Invalid response from server'}
+                return {'success': False, 'message': 'Invalid response from server', 'status_code': response.status_code}
             
-            # Check if response indicates success
             if response.status_code >= 200 and response.status_code < 300:
-                return {'success': True, 'data': result.get('data'), 'message': result.get('message', 'Success')}
+                return {'success': True, 'data': result.get('data'), 'message': result.get('message', 'Success'), 'status_code': response.status_code}
             else:
-                return {'success': False, 'message': result.get('message', 'Request failed')}
+                return {'success': False, 'message': result.get('message', 'Request failed'), 'status_code': response.status_code}
                 
         except requests.exceptions.RequestException as e:
             logger.error(f"❌ Request error: {e}")
@@ -126,8 +120,6 @@ class APIClient:
         params = {'blocked': str(blocked).lower()}
         return self._make_request('GET', '/accountants', params=params, requires_auth=True)
     
-    # api_client.py - Add this method
-
     def generate_game_code(self, user_id):
         """Generate a one-time code for the game link"""
         data = {'userId': user_id}
@@ -137,5 +129,44 @@ class APIClient:
         """Exchange a game code for a JWT token"""
         data = {'code': code}
         return self._make_request('POST', '/auth/exchange-game-code', data)
+    
+    def refresh_token(self):
+        """Refresh the current token using the refresh endpoint"""
+        if not self.token:
+            return {'success': False, 'message': 'No token to refresh'}
+        
+        headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {self.token}'}
+        
+        try:
+            response = self.session.post(
+                f"{self.base_url}/auth/refresh-token",
+                headers=headers,
+                timeout=60
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('success'):
+                    new_token = result.get('data', {}).get('token')
+                    if new_token:
+                        self.set_token(new_token)
+                        return {'success': True, 'token': new_token, 'data': result.get('data')}
+            
+            return {'success': False, 'message': 'Refresh failed'}
+        except Exception as e:
+            logger.error(f"❌ Refresh token error: {e}")
+            return {'success': False, 'message': str(e)}
+    
+    # ✅ ADD THIS MISSING METHOD
+    def check_user_by_telegram_id(self, tg_id):
+        """Check if a user exists in the database by Telegram ID"""
+        clean_tg_id = tg_id.replace('@', '').strip()
+        return self._make_request('GET', f'/auth/check-user/{clean_tg_id}')
+    
+    def check_user_and_token(self, tg_id):
+        """Single API call that checks user and token in one go"""
+        clean_tg_id = tg_id.replace('@', '').strip()
+        return self._make_request('GET', f'/auth/check-user-token/{clean_tg_id}', requires_auth=False)
+            
 # Global API client instance
 api = APIClient()
